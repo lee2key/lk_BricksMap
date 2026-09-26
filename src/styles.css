@@ -1,0 +1,213 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  font-family: "Plus Jakarta Sans", system-ui, sans-serif;
+  background: #cfcfcf;
+  color: #1a1a1a;
+  user-select: none;
+}
+
+.app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  background: #ececec;
+  border-bottom: 1px solid #bdbdbd;
+  z-index: 2;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  font-size: 14px;
+}
+
+.logo {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: #f5a04a;
+  box-shadow: 4px 4px 0 #4da6e8;
+}
+
+.toolbar-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.toolbar button {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid #b5b5b5;
+  background: #fff;
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.toolbar button:hover {
+  background: #f7f7f7;
+}
+
+.hint {
+  margin: 0 0 0 auto;
+  font-size: 11px;
+  color: #666;
+  font-weight: 500;
+}
+
+.hint b {
+  color: #222;
+}
+
+.board {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 1px 1px, rgba(0, 0, 0, 0.06) 1px, transparent 0) 0 0 / 24px 24px,
+    #cfcfcf;
+  cursor: grab;
+}
+
+.board.panning,
+.board:active {
+  cursor: grabbing;
+}
+
+.world {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  width: 1px;
+  height: 1px;
+}
+
+.brick {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  font-weight: 800;
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  color: #1c1c1c;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.35) inset, 0 1px 2px rgba(0, 0, 0, 0.12);
+  cursor: pointer;
+}
+
+.brick.dark {
+  color: #f3f3f3;
+}
+
+.brick.selected {
+  outline: 2px solid #111;
+  outline-offset: 2px;
+}
+
+.brick-title {
+  padding: 0 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  pointer-events: none;
+}
+
+.brick-input {
+  width: calc(100% - 16px);
+  border: none;
+  background: rgba(255, 255, 255, 0.7);
+  font: inherit;
+  font-weight: 800;
+  text-align: center;
+  border-radius: 3px;
+  padding: 4px 6px;
+  outline: none;
+}
+
+.plus-zone {
+  position: absolute;
+  left: 10%;
+  right: 10%;
+  bottom: 0;
+  height: 12px;
+}
+
+.plus {
+  position: absolute;
+  left: 50%;
+  bottom: -11px;
+  transform: translateX(-50%);
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: none;
+  background: #1d1d1d;
+  color: #fff;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+}
+
+.plus:hover {
+  background: #000;
+  transform: translateX(-50%) scale(1.08);
+}
+
+.inspector {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  background: #fff;
+  border-radius: 10px;
+  padding: 12px 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  font-size: 11px;
+  font-weight: 600;
+  color: #555;
+}
+
+.swatches {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  cursor: pointer;
+  padding: 0;
+}
+
+.swatch.on {
+  outline: 2px solid #111;
+  outline-offset: 1px;
+}
