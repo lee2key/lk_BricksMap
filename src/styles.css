@@ -68,7 +68,8 @@ body,
 }
 
 .hint {
-  margin: 0 0 0 auto;
+  margin: 0;
+  line-height: 1.7;
   font-size: 11px;
   color: #666;
   font-weight: 500;
@@ -182,7 +183,7 @@ body,
 .inspector {
   position: absolute;
   right: 16px;
-  bottom: 16px;
+  bottom: 84px;
   background: #fff;
   border-radius: 10px;
   padding: 12px 14px;
@@ -211,3 +212,32 @@ body,
   outline: 2px solid #111;
   outline-offset: 1px;
 }
+
+.toolbar-actions { flex-shrink: 0; }
+.file-error { padding: 8px 16px; background: #ffe4e4; color: #8b1616; }
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 10px 16px;
+  background: #ececec;
+  border-top: 1px solid #bdbdbd;
+}
+.fit-all {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 1px solid #b5b5b5;
+  border-radius: 6px;
+  background: #fff;
+  color: #222;
+  cursor: pointer;
+}
+.fit-all:hover { background: #f7f7f7; }
+.fit-all:focus-visible { outline: 2px solid #111; outline-offset: 2px; }
+.board { min-height: 0; }

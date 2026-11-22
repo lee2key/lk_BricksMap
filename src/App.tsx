@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   addChild,
   blankTree,
@@ -24,14 +24,29 @@ function loadTree(): BrickNode {
   return exampleTree();
 }
 
+type BoardAction = { type: "change"; value: BrickNode | ((tree: BrickNode) => BrickNode) } | { type: "undo" };
+
+function boardReducer(state: { tree: BrickNode; past: BrickNode[] }, action: BoardAction) {
+  if (action.type === "undo") {
+    if (!state.past.length) return state;
+    return { tree: state.past[state.past.length - 1], past: state.past.slice(0, -1) };
+  }
+  const tree = typeof action.value === "function" ? action.value(state.tree) : action.value;
+  if (JSON.stringify(tree) === JSON.stringify(state.tree)) return state;
+  return { tree, past: [...state.past, state.tree].slice(-30) };
+}
+
 export default function App() {
-  const [tree, setTree] = useState<BrickNode>(loadTree);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [{ tree }, dispatch] = useReducer(boardReducer, undefined, () => ({ tree: loadTree(), past: [] }));
+  const setTree = (value: BrickNode | ((tree: BrickNode) => BrickNode)) => dispatch({ type: "change", value });
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [editingId, setEditingId] = useState<string | null>(null);
   const [hoverPlusId, setHoverPlusId] = useState<string | null>(null);
   const [camera, setCamera] = useState({ x: 80, y: 90, scale: 1 });
   const [spaceDown, setSpaceDown] = useState(false);
 
+  const importRef = useRef<HTMLInputElement>(null);
+  const [fileError, setFileError] = useState("");
   const boardRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{
     dragging: boolean;
@@ -47,8 +62,37 @@ export default function App() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(tree));
   }, [tree]);
 
+  const fitAll = useCallback(() => {
+    const rect = boardRef.current?.getBoundingClientRect();
+    if (!rect || !placed.length || !rect.width || !rect.height) return;
+    const left = Math.min(...placed.map((b) => b.x));
+    const top = Math.min(...placed.map((b) => b.y));
+    const width = Math.max(...placed.map((b) => b.x + b.width)) - left;
+    const height = Math.max(...placed.map((b) => b.y + b.height)) - top;
+    const scale = Math.min(1, Math.max(1, rect.width - 80) / width, Math.max(1, rect.height - 80) / height);
+    dragRef.current.dragging = false;
+    setCamera({ scale, x: (rect.width - width * scale) / 2 - left * scale, y: (rect.height - height * scale) / 2 - top * scale });
+  }, [placed]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      const typing = target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
+      if (e.type === "keydown" && !typing) {
+        if (e.ctrlKey && !e.altKey && !e.shiftKey && e.code === "KeyZ") {
+          e.preventDefault();
+          dispatch({ type: "undo" });
+          setSelectedIds(new Set());
+          setEditingId(null);
+          setHoverPlusId(null);
+          return;
+        }
+        if (e.code === "KeyF" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          e.preventDefault();
+          fitAll();
+          return;
+        }
+      }
       if (e.code === "Space") {
         if (e.type === "keydown") {
           if (e.repeat) return;
@@ -60,13 +104,16 @@ export default function App() {
           setSpaceDown(false);
         }
       }
-      if (e.type === "keydown" && (e.key === "Delete" || e.key === "Backspace")) {
+      if (e.type === "keydown" && (e.key === "Delete" || e.key === "Backspace" ||
+        (e.code === "KeyX" && !e.ctrlKey && !e.metaKey && !e.altKey))) {
         const t = e.target as HTMLElement;
-        if (t.tagName === "INPUT" || t.isContentEditable) return;
-        if (selectedId && selectedId !== tree.id) {
+        if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable) return;
+        if ([...selectedIds].some((id) => id !== tree.id)) {
           e.preventDefault();
-          setTree((prev) => removeNode(prev, selectedId));
-          setSelectedId(null);
+          setTree((prev) => [...selectedIds].reduce((next, id) => removeNode(next, id), prev));
+          setEditingId(null);
+          setHoverPlusId(null);
+          setSelectedIds(new Set());
         }
       }
     };
@@ -76,7 +123,7 @@ export default function App() {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("keyup", onKey);
     };
-  }, [selectedId, tree.id]);
+  }, [selectedIds, tree.id, fitAll]);
 
   const onWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault();
@@ -105,7 +152,7 @@ export default function App() {
       cy: camera.y,
     };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    if (onEmpty && !spaceDown) setSelectedId(null);
+    if (onEmpty && !spaceDown) setSelectedIds(new Set());
   };
 
   const onPointerMoveBoard = (e: React.PointerEvent) => {
@@ -126,26 +173,71 @@ export default function App() {
   const handleAdd = (id: string) => {
     const { tree: next, newId } = addChild(tree, id);
     setTree(next);
-    setSelectedId(newId);
+    setSelectedIds(new Set([newId]));
     setEditingId(newId);
     setHoverPlusId(null);
   };
 
-  const selected = placed.find((p) => p.id === selectedId);
+  const exportBoard = () => {
+    const blob = new Blob([JSON.stringify({ format: "bricks-map", version: 1, tree }, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "bricks-map.json";
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const importBoard = async (file: File) => {
+    setFileError("");
+    try {
+      if (file.size > 5 * 1024 * 1024) throw new Error("File is too large (maximum 5 MB).");
+      const data = JSON.parse(await file.text());
+      if (data?.format !== "bricks-map" || data.version !== 1) throw new Error("Unsupported board file.");
+      const ids = new Set<string>();
+      const validate = (node: unknown, depth = 0): BrickNode => {
+        if (!node || typeof node !== "object" || depth > 100 || ids.size >= 10000) throw new Error("Invalid board structure.");
+        const n = node as Record<string, unknown>;
+        if (typeof n.id !== "string" || !n.id || ids.has(n.id) || typeof n.title !== "string" ||
+          typeof n.color !== "string" || !/^#[0-9a-f]{6}$/i.test(n.color) || !Array.isArray(n.children)) {
+          throw new Error("Invalid board structure.");
+        }
+        ids.add(n.id);
+        return { id: n.id, title: n.title, color: n.color, children: n.children.map((child) => validate(child, depth + 1)) };
+      };
+      const next = validate(data.tree);
+      setTree(next);
+      setSelectedIds(new Set());
+      setEditingId(null);
+      setHoverPlusId(null);
+      setCamera({ x: 80, y: 90, scale: 1 });
+    } catch (error) {
+      setFileError(error instanceof SyntaxError ? "Invalid JSON file." : error instanceof Error ? error.message : "Could not read the board file.");
+    }
+  };
+
+  const selected = selectedIds.size === 1 ? placed.find((p) => selectedIds.has(p.id)) : undefined;
 
   return (
     <div className="app">
       <header className="toolbar">
         <div className="brand">
           <span className="logo" />
-          Bricks Map
+          lk Bricks
         </div>
         <div className="toolbar-actions">
+          <button type="button" onClick={exportBoard}>Export</button>
+          <button type="button" onClick={() => importRef.current?.click()} title="Replace the current board from a file">Import</button>
+          <input ref={importRef} type="file" accept=".json,application/json" hidden onChange={(e) => {
+            const file = e.currentTarget.files?.[0];
+            e.currentTarget.value = "";
+            if (file) void importBoard(file);
+          }} />
           <button
             type="button"
             onClick={() => {
               setTree(blankTree());
-              setSelectedId(null);
+              setSelectedIds(new Set());
               setEditingId(null);
               setCamera({ x: 80, y: 90, scale: 1 });
             }}
@@ -156,7 +248,7 @@ export default function App() {
             type="button"
             onClick={() => {
               setTree(exampleTree());
-              setSelectedId(null);
+              setSelectedIds(new Set());
               setEditingId(null);
               setCamera({ x: 80, y: 90, scale: 1 });
             }}
@@ -164,10 +256,9 @@ export default function App() {
             Load example
           </button>
         </div>
-        <p className="hint">
-          Hover the bottom of a brick for <b>+</b> · double-click to rename · Delete to remove · drag canvas or hold Space to pan · scroll to zoom
-        </p>
+
       </header>
+      {fileError && <div role="alert" className="file-error">{fileError}</div>}
 
       <div
         ref={boardRef}
@@ -189,10 +280,16 @@ export default function App() {
             <Brick
               key={brick.id}
               brick={brick}
-              selected={brick.id === selectedId}
+              selected={selectedIds.has(brick.id)}
               editing={brick.id === editingId}
               showPlus={hoverPlusId === brick.id}
-              onSelect={() => setSelectedId(brick.id)}
+              onSelect={(toggle) => setSelectedIds((prev) => {
+                if (!toggle) return new Set([brick.id]);
+                const next = new Set(prev);
+                if (next.has(brick.id)) next.delete(brick.id);
+                else next.add(brick.id);
+                return next;
+              })}
               onEdit={() => setEditingId(brick.id)}
               onRename={(title) => {
                 setTree((prev) => renameNode(prev, brick.id, title));
@@ -205,6 +302,17 @@ export default function App() {
           ))}
         </div>
       </div>
+
+      <footer className="statusbar">
+        <p className="hint">
+          Hover the bottom of a brick for <b>+</b> · double-click to rename · Shift + click to select multiple · X / Delete to remove · drag canvas or hold Space to pan · scroll to zoom · F to fit all · Ctrl+Z to undo
+        </p>
+        <button type="button" className="fit-all" onClick={fitAll} title="Fit All (F)" aria-label="Fit All (F)">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M8 3H3v5M16 3h5v5M21 16v5h-5M8 21H3v-5" />
+          </svg>
+        </button>
+      </footer>
 
       {selected && (
         <aside className="inspector">
@@ -245,7 +353,7 @@ function Brick({
   selected: boolean;
   editing: boolean;
   showPlus: boolean;
-  onSelect: () => void;
+  onSelect: (toggle: boolean) => void;
   onEdit: () => void;
   onRename: (title: string) => void;
   onPlusEnter: () => void;
@@ -274,7 +382,7 @@ function Brick({
       }}
       onPointerDown={(e) => {
         e.stopPropagation();
-        onSelect();
+        if (e.button === 0) onSelect(e.shiftKey);
       }}
       onDoubleClick={(e) => {
         e.stopPropagation();

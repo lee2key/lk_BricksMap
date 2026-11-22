@@ -8,7 +8,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 600,
     backgroundColor: "#cfcfcf",
-    title: "Bricks Map",
+    title: "lk Bricks",
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
