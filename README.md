@@ -1,41 +1,30 @@
-# lk Bricks
+# lk Bricks Map
 
-Download the portable **lk_BricksMap** executable for Windows x64 from [GitHub Releases](https://github.com/lee2key/lk_BricksMap/releases/latest) and double-click it. Keep the executable and the adjacent `lk Bricks Data` folder together to move your autosaved board.
+A whiteboard for building trees of colored blocks. Download the portable Windows x64 EXE from [GitHub Releases](https://github.com/lee2key/lk_BricksMap/releases/latest) and double-click it. The app uses the Microsoft WebView2 Runtime already present on Windows 11 and many Windows 10 systems.
 
-Windows whiteboard for a **top-down brick tree** — one root bar, children in a row underneath, and a **+** that appears when you hover the bottom of a brick.
+Keep the EXE in a writable folder. The app opens `board.json` beside it on startup and saves changes there once a minute and on normal exit. To move a board, copy its JSON with the EXE. To migrate an older Electron board, export it there and import it here.
 
-## Run (dev)
+## Controls
 
-```bash
-npm install
+- Hover the growing edge of a block and click **+** to add children. If the block is selected, **+** adds a child under every selected block.
+- Double-click to rename. While editing, press **Tab** to add and edit the next sibling.
+- Click to select, **Shift + click** to toggle blocks, or drag with the left mouse button to select an area. The palette applies colors to the whole selection.
+- Drag with the middle mouse button to pan. Scroll to zoom.
+- **Layout** switches between top-to-bottom and left-to-right. **F** or **Fit All** frames the tree. Startup and import also fit the tree.
+- **X**, **Delete**, or **Backspace** removes selected blocks and their descendants. **Ctrl+Z** undoes up to 30 board changes.
+- **Create New** starts a board with one root. **Import** opens a JSON board. **Export** opens a Save As dialog in the desktop app.
+
+## Develop and build
+
+```powershell
+npm ci
 npm start
 ```
 
-This opens the desktop window. For the browser only: `npm run dev`, then open http://127.0.0.1:5173
+Open the URL printed by Vite to work in the browser. To build the portable Windows EXE:
 
-## Windows builds
-
-```bash
+```powershell
 npm run dist
 ```
 
-Creates a Windows installer in `release/`. Run `npm run dist:portable` to build a standalone executable instead.
-
-## Use
-
-- Hover the **bottom edge** of any rectangle → **+** appears
-- Click **+** to add a child brick under it (new bricks join that parent’s row)
-- Double-click a brick to rename
-- Hold **Shift** and click bricks to toggle any combination of selected bricks
-- Press **X**, **Delete**, or **Backspace** to remove selected bricks and their descendants (root stays); X also works with the Russian keyboard layout
-- Click a brick without Shift to select only it; click empty canvas to clear selection
-- Drag empty canvas (or hold **Space**) to pan; mouse wheel to zoom
-- **New map** starts from a single root; **Load example** shows a Houdini-style tree
-
-## Board files
-
-- **Export** downloads the current board as `bricks-map.json`, including all titles, colors, and hierarchy.
-- **Import** loads an exported JSON file and replaces the current board. Export first if you want to keep it. Invalid files leave the board unchanged.
-
-- **Ctrl+Z** undoes up to 30 board changes (including import, new map, and loading the example). Selection and camera movements do not count; history lasts until the app reloads.
-- **F** or **Fit All** centers the entire board and adjusts zoom to fit it on screen. Shortcuts also work with the Russian keyboard layout; while editing text, Ctrl+Z keeps its normal text-editing behavior.
+The build downloads a pinned Microsoft WebView2 SDK and produces `release/lk Bricks Map.exe`.

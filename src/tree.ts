@@ -31,6 +31,17 @@ const PALETTE = [
   "#8B9AE0",
 ];
 
+const SWATCH_HUES = ["#F44336", "#F88917", "#F2C500", "#69BA32", "#16AF84", "#10BACA", "#2485F5", "#554BDE", "#A544DB", "#E43D9A"];
+
+export const COLOR_ROWS = [
+  ...[0, 0.18, 0.36, 0.54, 0.72, 0.87].map((fade) =>
+    SWATCH_HUES.map((hue) => mixHex(hue, "#ffffff", fade)),
+  ),
+  Array.from({ length: SWATCH_HUES.length }, (_, column) =>
+    mixHex("#000000", "#ffffff", column / (SWATCH_HUES.length - 1)),
+  ),
+];
+
 function uid() {
   return crypto.randomUUID();
 }
@@ -75,15 +86,6 @@ export function cloneTree(node: BrickNode): BrickNode {
   };
 }
 
-export function findNode(node: BrickNode, id: string): BrickNode | null {
-  if (node.id === id) return node;
-  for (const child of node.children) {
-    const found = findNode(child, id);
-    if (found) return found;
-  }
-  return null;
-}
-
 export function findParent(node: BrickNode, id: string): BrickNode | null {
   for (const child of node.children) {
     if (child.id === id) return node;
@@ -101,15 +103,28 @@ export function mapTree(node: BrickNode, fn: (n: BrickNode, depth: number) => Br
   };
 }
 
-export function addChild(root: BrickNode, parentId: string): { tree: BrickNode; newId: string } {
+export function addChildren(root: BrickNode, parentIds: ReadonlySet<string>) {
+  const added = new Map<string, string>();
+  const tree = mapTree(root, (parent, depth) => {
+    if (!parentIds.has(parent.id)) return parent;
+    const color = childColor(parent.color, parent.children.length, depth);
+    const child = createNode("New", color);
+    added.set(parent.id, child.id);
+    return { ...parent, children: [...parent.children, child] };
+  });
+  return { tree, added };
+}
+
+export function renameAndAddSibling(root: BrickNode, id: string, title: string) {
   const tree = cloneTree(root);
-  const parent = findNode(tree, parentId);
-  if (!parent) return { tree, newId: "" };
-  const depth = nodeDepth(tree, parentId);
-  const color = childColor(parent.color, parent.children.length, depth);
-  const child = createNode("New", color);
-  parent.children = [...parent.children, child];
-  return { tree, newId: child.id };
+  const parent = findParent(tree, id);
+  if (!parent) return null;
+  const index = parent.children.findIndex((child) => child.id === id);
+  parent.children[index].title = title;
+  const depth = nodeDepth(tree, parent.id);
+  const sibling = createNode("New", childColor(parent.color, index + 1, depth));
+  parent.children.splice(index + 1, 0, sibling);
+  return { tree, newId: sibling.id };
 }
 
 export function renameNode(root: BrickNode, id: string, title: string): BrickNode {
@@ -126,8 +141,8 @@ export function removeNode(root: BrickNode, id: string): BrickNode {
   };
 }
 
-export function recolorNode(root: BrickNode, id: string, color: string): BrickNode {
-  return mapTree(root, (n) => (n.id === id ? { ...n, color } : n));
+export function recolorNodes(root: BrickNode, ids: ReadonlySet<string>, color: string): BrickNode {
+  return mapTree(root, (node) => (ids.has(node.id) ? { ...node, color } : node));
 }
 
 function nodeDepth(root: BrickNode, id: string, depth = 0): number {
@@ -145,107 +160,56 @@ function measureTextWidth(title: string) {
   measureCanvas ??= document.createElement("canvas");
   const ctx = measureCanvas.getContext("2d");
   if (!ctx) return title.length * 8;
-  ctx.font = '700 15px "Plus Jakarta Sans", system-ui, sans-serif';
+  ctx.font = '400 15px "Roboto Flex", system-ui, sans-serif';
   return ctx.measureText(title || "New").width;
 }
 
-type Sized = { width: number; subtreeHeight: number };
+export type TreeDirection = "down" | "right";
 
-function measure(node: BrickNode): Sized {
-  const labelW = Math.ceil(measureTextWidth(node.title) + 36);
-  if (node.children.length === 0) {
-    return { width: Math.max(MIN_WIDTH, labelW), subtreeHeight: NODE_HEIGHT };
-  }
-  const kids = node.children.map(measure);
-  const kidsW = kids.reduce((s, k) => s + k.width, 0) + H_GAP * (node.children.length - 1);
-  return {
-    width: Math.max(MIN_WIDTH, labelW, kidsW),
-    subtreeHeight: NODE_HEIGHT + V_GAP + Math.max(...kids.map((k) => k.subtreeHeight)),
-  };
-}
+type Sized = { span: number; children: Sized[] };
 
-export function layoutTree(root: BrickNode, originX = 0, originY = 0): PlacedBrick[] {
+export function layoutTree(root: BrickNode, direction: TreeDirection = "down"): PlacedBrick[] {
   const placed: PlacedBrick[] = [];
+  const columnWidths: number[] = [];
+  const sideways = direction === "right";
+  const gap = sideways ? V_GAP : H_GAP;
 
-  const walk = (node: BrickNode, x: number, y: number, depth: number): Sized => {
-    const size = measure(node);
-    placed.push({
-      id: node.id,
-      title: node.title,
-      color: node.color,
-      x,
-      y,
-      width: size.width,
-      height: NODE_HEIGHT,
-      depth,
-    });
-
-    if (node.children.length === 0) return size;
-
-    const kidSizes = node.children.map(measure);
-    const kidsW = kidSizes.reduce((s, k) => s + k.width, 0) + H_GAP * (node.children.length - 1);
-    let cx = x + Math.max(0, (size.width - kidsW) / 2);
-    const cy = y + NODE_HEIGHT + V_GAP;
-    node.children.forEach((child, i) => {
-      walk(child, cx, cy, depth + 1);
-      cx += kidSizes[i].width + H_GAP;
-    });
-    return size;
+  const measure = (node: BrickNode, depth: number): Sized => {
+    const labelWidth = Math.max(MIN_WIDTH, Math.ceil(measureTextWidth(node.title) + 36));
+    if (sideways) columnWidths[depth] = Math.max(columnWidths[depth] ?? 0, labelWidth);
+    const children = node.children.map((child) => measure(child, depth + 1));
+    const childrenSpan = children.reduce((sum, child) => sum + child.span, 0) + gap * Math.max(0, children.length - 1);
+    return { span: Math.max(sideways ? NODE_HEIGHT : labelWidth, childrenSpan), children };
   };
 
-  walk(root, originX, originY, 0);
+  const walk = (node: BrickNode, size: Sized, along: number, across: number, depth: number, span = size.span) => {
+    const width = sideways ? columnWidths[depth] : span;
+    const height = sideways ? span : NODE_HEIGHT;
+    placed.push({
+      id: node.id, title: node.title, color: node.color,
+      x: sideways ? along : across,
+      y: sideways ? across : along,
+      width, height, depth,
+    });
+    if (node.children.length === 0) return;
+
+    const nextAlong = along + (sideways ? width + H_GAP : height + V_GAP);
+    if (node.children.length === 1) {
+      walk(node.children[0], size.children[0], nextAlong, across, depth + 1, span);
+      return;
+    }
+
+    const childrenSpan = size.children.reduce((sum, child) => sum + child.span, 0) + gap * (node.children.length - 1);
+    let nextAcross = across + (span - childrenSpan) / 2;
+    node.children.forEach((child, index) => {
+      const childSize = size.children[index];
+      walk(child, childSize, nextAlong, nextAcross, depth + 1);
+      nextAcross += childSize.span + gap;
+    });
+  };
+
+  walk(root, measure(root, 0), 0, 0, 0);
   return placed;
-}
-
-export function exampleTree(): BrickNode {
-  const characters = createNode("Characters", "#C8E6C4", [
-    createNode("Body", "#2A2A2A"),
-    createNode("Face", "#2A2A2A"),
-    createNode("Hands", "#2A2A2A"),
-    createNode("Clothes", "#2A2A2A"),
-  ]);
-  const crowd = createNode("Crowd", "#C8E6C4");
-  const animation = createNode("Animation", "#7BC67E", [characters, crowd]);
-
-  const rbd = createNode("RBD", "#B9DFF7");
-  const velum = createNode("Velum", "#B9DFF7", [
-    createNode("Deformation", "#9FD0F0"),
-    createNode("Veg", "#9FD0F0"),
-    createNode("Clothes", "#9FD0F0"),
-    createNode("Fur", "#9FD0F0"),
-    createNode("Muscle", "#9FD0F0"),
-    createNode("Hair", "#9FD0F0"),
-  ]);
-  const fluids = createNode("Fluids", "#B9DFF7");
-  const particles = createNode("Particles", "#B9DFF7", [
-    createNode("Dust", "#2A2A2A"),
-    createNode("Debris", "#2A2A2A"),
-    createNode("Sparks", "#2A2A2A"),
-    createNode("Magic", "#2A2A2A"),
-  ]);
-  const grains = createNode("Grains", "#B9DFF7");
-  const volume = createNode("Volume", "#B9DFF7", [
-    createNode("Fire", "#D6EEFB"),
-    createNode("Steam", "#D6EEFB"),
-    createNode("Smoke", "#D6EEFB"),
-    createNode("Clouds", "#D6EEFB"),
-    createNode("VDB", "#D6EEFB"),
-  ]);
-  const simulations = createNode("Simulations", "#4DA6E8", [
-    rbd,
-    velum,
-    fluids,
-    particles,
-    grains,
-    volume,
-  ]);
-
-  const other = createNode("Other", "#9B6BDB", [
-    createNode("Modeling", "#C9B3F0"),
-    createNode("PDD", "#C9B3F0"),
-  ]);
-
-  return createNode("HOUDINI", "#F5A04A", [animation, simulations, other]);
 }
 
 export function blankTree(): BrickNode {

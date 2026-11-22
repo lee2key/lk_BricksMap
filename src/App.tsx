@@ -1,27 +1,63 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
-  addChild,
+  addChildren,
+  COLOR_ROWS,
   blankTree,
   BrickNode,
-  exampleTree,
   layoutTree,
   PlacedBrick,
-  recolorNode,
+  recolorNodes,
   removeNode,
+  renameAndAddSibling,
   renameNode,
+  type TreeDirection,
 } from "./tree";
 
 const STORAGE_KEY = "bricks-map-tree-v1";
-const COLORS = ["#F5A04A", "#7BC67E", "#4DA6E8", "#9B6BDB", "#5EC8C5", "#E8789A", "#2A2A2A", "#9FD0F0"];
+const DIRECTION_KEY = "bricks-map-direction";
+
+declare global {
+  interface Window {
+    lkInitialBoard?: string | null;
+    chrome?: { webview?: { postMessage(message: string): void } };
+  }
+}
+
+function parseBoard(raw: string): BrickNode {
+  const data = JSON.parse(raw);
+  if (data?.format !== "bricks-map" || data.version !== 1) throw new Error("Unsupported board file.");
+  const ids = new Set<string>();
+  const validate = (node: unknown, depth = 0): BrickNode => {
+    if (!node || typeof node !== "object" || depth > 100 || ids.size >= 10000) throw new Error("Invalid board structure.");
+    const n = node as Record<string, unknown>;
+    if (typeof n.id !== "string" || !n.id || ids.has(n.id) || typeof n.title !== "string" ||
+      typeof n.color !== "string" || !/^#[0-9a-f]{6}$/i.test(n.color) || !Array.isArray(n.children)) {
+      throw new Error("Invalid board structure.");
+    }
+    ids.add(n.id);
+    return { id: n.id, title: n.title, color: n.color, children: n.children.map((child) => validate(child, depth + 1)) };
+  };
+  return validate(data.tree);
+}
 
 function loadTree(): BrickNode {
+  if (window.lkInitialBoard !== undefined) {
+    if (window.lkInitialBoard === null) return blankTree();
+    try {
+      const bytes = Uint8Array.from(atob(window.lkInitialBoard), char => char.charCodeAt(0));
+      return parseBoard(new TextDecoder().decode(bytes));
+    } catch (error) {
+      window.chrome?.webview?.postMessage("invalid");
+      throw error;
+    }
+  }
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) return JSON.parse(raw) as BrickNode;
   } catch {
     /* ignore */
   }
-  return exampleTree();
+  return blankTree();
 }
 
 type BoardAction = { type: "change"; value: BrickNode | ((tree: BrickNode) => BrickNode) } | { type: "undo" };
@@ -36,43 +72,88 @@ function boardReducer(state: { tree: BrickNode; past: BrickNode[] }, action: Boa
   return { tree, past: [...state.past, state.tree].slice(-30) };
 }
 
+type Point = { x: number; y: number };
+type Marquee = { left: number; top: number; right: number; bottom: number };
+type Gesture =
+  | { kind: "pan"; pointerId: number; start: Point; camera: Point }
+  | { kind: "select"; pointerId: number; start: Point; brickId?: string; extend: boolean; moved: boolean };
+
+function selectionBounds(start: Point, end: Point): Marquee {
+  return {
+    left: Math.min(start.x, end.x),
+    top: Math.min(start.y, end.y),
+    right: Math.max(start.x, end.x),
+    bottom: Math.max(start.y, end.y),
+  };
+}
+
 export default function App() {
   const [{ tree }, dispatch] = useReducer(boardReducer, undefined, () => ({ tree: loadTree(), past: [] }));
   const setTree = (value: BrickNode | ((tree: BrickNode) => BrickNode)) => dispatch({ type: "change", value });
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [editingId, setEditingId] = useState<string | null>(null);
   const [hoverPlusId, setHoverPlusId] = useState<string | null>(null);
+  const [direction, setDirection] = useState<TreeDirection>(() => {
+    try { return localStorage.getItem(DIRECTION_KEY) === "right" ? "right" : "down"; }
+    catch { return "down"; }
+  });
   const [camera, setCamera] = useState({ x: 80, y: 90, scale: 1 });
-  const [spaceDown, setSpaceDown] = useState(false);
+  const [panning, setPanning] = useState(false);
+  const [marquee, setMarquee] = useState<Marquee | null>(null);
 
   const importRef = useRef<HTMLInputElement>(null);
   const [fileError, setFileError] = useState("");
   const boardRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef<{
-    dragging: boolean;
-    px: number;
-    py: number;
-    cx: number;
-    cy: number;
-  }>({ dragging: false, px: 0, py: 0, cx: 0, cy: 0 });
+  const gestureRef = useRef<Gesture | null>(null);
 
-  const placed = useMemo(() => layoutTree(tree), [tree]);
+  const endGesture = useCallback(() => {
+    const gesture = gestureRef.current;
+    gestureRef.current = null;
+    const board = boardRef.current;
+    if (gesture && board?.hasPointerCapture(gesture.pointerId)) {
+      board.releasePointerCapture(gesture.pointerId);
+    }
+    setPanning(false);
+    setMarquee(null);
+  }, []);
 
+  const placed = useMemo(() => layoutTree(tree, direction), [tree, direction]);
+
+  const previousTree = useRef(tree);
   useEffect(() => {
+    if (window.lkInitialBoard !== undefined) {
+      if (previousTree.current !== tree) {
+        window.chrome?.webview?.postMessage(JSON.stringify({ format: "bricks-map", version: 1, tree }, null, 2));
+        previousTree.current = tree;
+      }
+      return;
+    }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(tree));
   }, [tree]);
 
-  const fitAll = useCallback(() => {
+  const fitBoard = useCallback((bricks: PlacedBrick[]) => {
     const rect = boardRef.current?.getBoundingClientRect();
-    if (!rect || !placed.length || !rect.width || !rect.height) return;
-    const left = Math.min(...placed.map((b) => b.x));
-    const top = Math.min(...placed.map((b) => b.y));
-    const width = Math.max(...placed.map((b) => b.x + b.width)) - left;
-    const height = Math.max(...placed.map((b) => b.y + b.height)) - top;
-    const scale = Math.min(1, Math.max(1, rect.width - 80) / width, Math.max(1, rect.height - 80) / height);
-    dragRef.current.dragging = false;
+    if (!rect || !bricks.length || !rect.width || !rect.height) return;
+    const left = Math.min(...bricks.map((b) => b.x));
+    const top = Math.min(...bricks.map((b) => b.y));
+    const width = Math.max(...bricks.map((b) => b.x + b.width)) - left;
+    const height = Math.max(...bricks.map((b) => b.y + b.height)) - top;
+    const scale = Math.min(1, Math.max(1, rect.width - 112) / width, Math.max(1, rect.height - 112) / height);
+    endGesture();
     setCamera({ scale, x: (rect.width - width * scale) / 2 - left * scale, y: (rect.height - height * scale) / 2 - top * scale });
-  }, [placed]);
+  }, [endGesture]);
+
+  const fitAll = useCallback(() => fitBoard(placed), [fitBoard, placed]);
+  const lastFittedDirection = useRef<TreeDirection>();
+  useLayoutEffect(() => {
+    if (lastFittedDirection.current === direction) return;
+    lastFittedDirection.current = direction;
+    fitAll();
+  }, [direction, fitAll]);
+
+  useEffect(() => {
+    try { localStorage.setItem(DIRECTION_KEY, direction); } catch { /* Storage is optional for view preferences. */ }
+  }, [direction]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -93,17 +174,6 @@ export default function App() {
           return;
         }
       }
-      if (e.code === "Space") {
-        if (e.type === "keydown") {
-          if (e.repeat) return;
-          const t = e.target as HTMLElement;
-          if (t.tagName === "INPUT" || t.tagName === "TEXTAREA") return;
-          e.preventDefault();
-          setSpaceDown(true);
-        } else {
-          setSpaceDown(false);
-        }
-      }
       if (e.type === "keydown" && (e.key === "Delete" || e.key === "Backspace" ||
         (e.code === "KeyX" && !e.ctrlKey && !e.metaKey && !e.altKey))) {
         const t = e.target as HTMLElement;
@@ -118,10 +188,8 @@ export default function App() {
       }
     };
     window.addEventListener("keydown", onKey);
-    window.addEventListener("keyup", onKey);
     return () => {
       window.removeEventListener("keydown", onKey);
-      window.removeEventListener("keyup", onKey);
     };
   }, [selectedIds, tree.id, fitAll]);
 
@@ -140,46 +208,128 @@ export default function App() {
     });
   }, []);
 
-  const onPointerDownBoard = (e: React.PointerEvent) => {
-    if (e.button !== 0 && e.button !== 1) return;
-    const onEmpty = e.target === e.currentTarget || (e.target as HTMLElement).dataset.world === "1";
-    if (!onEmpty && !spaceDown && e.button !== 1) return;
-    dragRef.current = {
-      dragging: true,
-      px: e.clientX,
-      py: e.clientY,
-      cx: camera.x,
-      cy: camera.y,
-    };
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    if (onEmpty && !spaceDown) setSelectedIds(new Set());
+  const pointerPosition = (e: React.PointerEvent<HTMLDivElement>): Point => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
 
-  const onPointerMoveBoard = (e: React.PointerEvent) => {
-    if (!dragRef.current.dragging) return;
-    const dx = e.clientX - dragRef.current.px;
-    const dy = e.clientY - dragRef.current.py;
-    setCamera({
-      ...camera,
-      x: dragRef.current.cx + dx,
-      y: dragRef.current.cy + dy,
-    });
+  const onPointerDownBoard = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (gestureRef.current || (e.button !== 0 && e.button !== 1)) return;
+    const target = e.target as Element;
+    if (target.closest(".board-actions") || (e.button === 0 && target.closest("button, input"))) return;
+
+    const start = pointerPosition(e);
+    if (e.button === 1) {
+      e.preventDefault();
+      gestureRef.current = { kind: "pan", pointerId: e.pointerId, start, camera };
+      e.currentTarget.setPointerCapture(e.pointerId);
+      setPanning(true);
+    } else {
+      const brickId = target.closest<HTMLElement>("[data-brick-id]")?.dataset.brickId;
+      gestureRef.current = { kind: "select", pointerId: e.pointerId, start, brickId, extend: e.shiftKey, moved: false };
+      if (!brickId) e.currentTarget.setPointerCapture(e.pointerId);
+    }
   };
 
-  const onPointerUpBoard = () => {
-    dragRef.current.dragging = false;
+  const onPointerMoveBoard = (e: React.PointerEvent<HTMLDivElement>) => {
+    const gesture = gestureRef.current;
+    if (!gesture || gesture.pointerId !== e.pointerId) return;
+    const point = pointerPosition(e);
+    if (gesture.kind === "pan") {
+      setCamera((cam) => ({
+        ...cam,
+        x: gesture.camera.x + point.x - gesture.start.x,
+        y: gesture.camera.y + point.y - gesture.start.y,
+      }));
+      return;
+    }
+
+    if (!gesture.moved && Math.hypot(point.x - gesture.start.x, point.y - gesture.start.y) < 4) return;
+    if (!gesture.moved) {
+      gesture.moved = true;
+      e.currentTarget.setPointerCapture(e.pointerId);
+    }
+    setMarquee(selectionBounds(gesture.start, point));
+  };
+
+  const onPointerUpBoard = (e: React.PointerEvent<HTMLDivElement>) => {
+    const gesture = gestureRef.current;
+    if (!gesture || gesture.pointerId !== e.pointerId) return;
+    if (gesture.kind === "select") {
+      if (gesture.moved) {
+        const box = selectionBounds(gesture.start, pointerPosition(e));
+        const hits = placed.filter((brick) => {
+          const left = camera.x + brick.x * camera.scale;
+          const top = camera.y + brick.y * camera.scale;
+          return left < box.right && left + brick.width * camera.scale > box.left &&
+            top < box.bottom && top + brick.height * camera.scale > box.top;
+        });
+        setSelectedIds((prev) => new Set([...(gesture.extend ? prev : []), ...hits.map((brick) => brick.id)]));
+      } else {
+        const id = gesture.brickId;
+        setSelectedIds((prev) => {
+          if (!gesture.extend) return new Set(id ? [id] : []);
+          if (!id) return prev;
+          const next = new Set(prev);
+          if (next.has(id)) next.delete(id);
+          else next.add(id);
+          return next;
+        });
+      }
+    }
+    endGesture();
+  };
+
+  const cancelPointerGesture = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (gestureRef.current?.pointerId === e.pointerId) endGesture();
   };
 
   const handleAdd = (id: string) => {
-    const { tree: next, newId } = addChild(tree, id);
+    const parents = selectedIds.has(id) ? selectedIds : new Set([id]);
+    const { tree: next, added } = addChildren(tree, parents);
+    const editingChild = added.get(id);
+    if (!editingChild) return;
     setTree(next);
-    setSelectedIds(new Set([newId]));
-    setEditingId(newId);
+    setSelectedIds(new Set(added.values()));
+    setEditingId(editingChild);
     setHoverPlusId(null);
   };
 
+  const handleAddSibling = (id: string, title: string) => {
+    const result = renameAndAddSibling(tree, id, title);
+    if (!result) return;
+
+    setTree(result.tree);
+    setSelectedIds(new Set([result.newId]));
+    setEditingId(result.newId);
+    setHoverPlusId(null);
+
+    const board = boardRef.current;
+    const sibling = layoutTree(result.tree, direction).find((brick) => brick.id === result.newId);
+    if (!board || !sibling) return;
+    setCamera((cam) => {
+      const padding = 24;
+      const keepVisible = (offset: number, start: number, size: number, viewport: number) => {
+        const min = padding - start * cam.scale;
+        const max = viewport - padding - (start + size) * cam.scale;
+        return Math.max(min, Math.min(max, offset));
+      };
+      return {
+        ...cam,
+        x: keepVisible(cam.x, sibling.x, sibling.width, board.clientWidth),
+        y: keepVisible(cam.y, sibling.y, sibling.height, board.clientHeight),
+      };
+    });
+  };
+
   const exportBoard = () => {
-    const blob = new Blob([JSON.stringify({ format: "bricks-map", version: 1, tree }, null, 2)], { type: "application/json" });
+    const json = JSON.stringify({ format: "bricks-map", version: 1, tree }, null, 2);
+    const webview = window.chrome?.webview;
+    if (window.lkInitialBoard !== undefined && webview) {
+      webview.postMessage("export:" + json);
+      return;
+    }
+    const blob = new Blob([json], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -192,82 +342,69 @@ export default function App() {
     setFileError("");
     try {
       if (file.size > 5 * 1024 * 1024) throw new Error("File is too large (maximum 5 MB).");
-      const data = JSON.parse(await file.text());
-      if (data?.format !== "bricks-map" || data.version !== 1) throw new Error("Unsupported board file.");
-      const ids = new Set<string>();
-      const validate = (node: unknown, depth = 0): BrickNode => {
-        if (!node || typeof node !== "object" || depth > 100 || ids.size >= 10000) throw new Error("Invalid board structure.");
-        const n = node as Record<string, unknown>;
-        if (typeof n.id !== "string" || !n.id || ids.has(n.id) || typeof n.title !== "string" ||
-          typeof n.color !== "string" || !/^#[0-9a-f]{6}$/i.test(n.color) || !Array.isArray(n.children)) {
-          throw new Error("Invalid board structure.");
-        }
-        ids.add(n.id);
-        return { id: n.id, title: n.title, color: n.color, children: n.children.map((child) => validate(child, depth + 1)) };
-      };
-      const next = validate(data.tree);
+      const next = parseBoard(await file.text());
       setTree(next);
       setSelectedIds(new Set());
       setEditingId(null);
       setHoverPlusId(null);
-      setCamera({ x: 80, y: 90, scale: 1 });
+      fitBoard(layoutTree(next, direction));
     } catch (error) {
       setFileError(error instanceof SyntaxError ? "Invalid JSON file." : error instanceof Error ? error.message : "Could not read the board file.");
     }
   };
 
-  const selected = selectedIds.size === 1 ? placed.find((p) => selectedIds.has(p.id)) : undefined;
+  const selected = placed.filter((brick) => selectedIds.has(brick.id));
 
   return (
     <div className="app">
       <header className="toolbar">
-        <div className="brand">
-          <span className="logo" />
-          lk Bricks
-        </div>
+        <button
+          type="button"
+          onClick={() => {
+            setTree(blankTree());
+            setHoverPlusId(null);
+            setSelectedIds(new Set());
+            setEditingId(null);
+            setCamera({ x: 80, y: 90, scale: 1 });
+          }}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+          Create New
+        </button>
         <div className="toolbar-actions">
-          <button type="button" onClick={exportBoard}>Export</button>
-          <button type="button" onClick={() => importRef.current?.click()} title="Replace the current board from a file">Import</button>
+          <button type="button" onClick={() => importRef.current?.click()} title="Replace the current board from a file">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M4 16v4h16v-4" /></svg>
+            Import
+          </button>
+          <button type="button" onClick={exportBoard}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3m-4 4 4-4 4 4M4 16v4h16v-4" /></svg>
+            Export
+          </button>
           <input ref={importRef} type="file" accept=".json,application/json" hidden onChange={(e) => {
             const file = e.currentTarget.files?.[0];
             e.currentTarget.value = "";
             if (file) void importBoard(file);
           }} />
-          <button
-            type="button"
-            onClick={() => {
-              setTree(blankTree());
-              setSelectedIds(new Set());
-              setEditingId(null);
-              setCamera({ x: 80, y: 90, scale: 1 });
-            }}
-          >
-            New map
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setTree(exampleTree());
-              setSelectedIds(new Set());
-              setEditingId(null);
-              setCamera({ x: 80, y: 90, scale: 1 });
-            }}
-          >
-            Load example
-          </button>
         </div>
-
       </header>
       {fileError && <div role="alert" className="file-error">{fileError}</div>}
 
       <div
         ref={boardRef}
-        className={`board ${spaceDown ? "panning" : ""}`}
+        data-direction={direction}
+        className={`board ${panning ? "panning" : marquee ? "selecting" : ""}`}
         onWheel={onWheel}
         onPointerDown={onPointerDownBoard}
         onPointerMove={onPointerMoveBoard}
         onPointerUp={onPointerUpBoard}
-        onPointerCancel={onPointerUpBoard}
+        onPointerCancel={cancelPointerGesture}
+        onLostPointerCapture={cancelPointerGesture}
+        onPointerLeave={(e) => {
+          if (!e.currentTarget.hasPointerCapture(e.pointerId)) cancelPointerGesture(e);
+        }}
+        onAuxClick={(e) => {
+          if (e.button === 1) e.preventDefault();
+        }}
       >
         <div
           className="world"
@@ -283,54 +420,76 @@ export default function App() {
               selected={selectedIds.has(brick.id)}
               editing={brick.id === editingId}
               showPlus={hoverPlusId === brick.id}
-              onSelect={(toggle) => setSelectedIds((prev) => {
-                if (!toggle) return new Set([brick.id]);
-                const next = new Set(prev);
-                if (next.has(brick.id)) next.delete(brick.id);
-                else next.add(brick.id);
-                return next;
-              })}
               onEdit={() => setEditingId(brick.id)}
               onRename={(title) => {
                 setTree((prev) => renameNode(prev, brick.id, title));
                 setEditingId(null);
               }}
+              onAddSibling={brick.id === tree.id ? undefined : (title) => handleAddSibling(brick.id, title)}
               onPlusEnter={() => setHoverPlusId(brick.id)}
               onPlusLeave={() => setHoverPlusId((id) => (id === brick.id ? null : id))}
               onAdd={() => handleAdd(brick.id)}
             />
           ))}
         </div>
+
+        {marquee && (
+          <div className="marquee" aria-hidden="true" style={{
+            left: marquee.left,
+            top: marquee.top,
+            width: marquee.right - marquee.left,
+            height: marquee.bottom - marquee.top,
+          }} />
+        )}
+
+        <p className="hint">
+          <span>+ · Add children to selected blocks</span>
+          <span>Double-click · Rename</span>
+          <span>Tab while editing · Add {direction === "right" ? "below" : "to the right"}</span>
+          <span>Shift + click · Select multiple blocks</span>
+          <span>X / Delete · Remove selected blocks</span>
+          <span>Ctrl + Z · Undo</span>
+          <span>Left drag · Select blocks</span>
+          <span>Middle drag · Pan</span>
+          <span>Scroll · Zoom</span>
+          <span>F · Fit all</span>
+        </p>
+        <div className="board-actions">
+          <button type="button" aria-pressed={direction === "right"}
+            title={direction === "right" ? "Show tree top to bottom" : "Show tree left to right"}
+            onClick={() => setDirection((current) => current === "right" ? "down" : "right")}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              {direction === "right" ? <path d="M4 12h15m-6-6 6 6-6 6" /> : <path d="M12 4v15m-6-6 6 6 6-6" />}
+            </svg>
+            Layout
+          </button>
+          <button type="button" onClick={fitAll} title="Fit All (F)" aria-label="Fit All (F)">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M8 3H3v5M16 3h5v5M21 16v5h-5M8 21H3v-5" />
+            </svg>
+            Fit All
+          </button>
+        </div>
       </div>
 
-      <footer className="statusbar">
-        <p className="hint">
-          Hover the bottom of a brick for <b>+</b> · double-click to rename · Shift + click to select multiple · X / Delete to remove · drag canvas or hold Space to pan · scroll to zoom · F to fit all · Ctrl+Z to undo
-        </p>
-        <button type="button" className="fit-all" onClick={fitAll} title="Fit All (F)" aria-label="Fit All (F)">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M8 3H3v5M16 3h5v5M21 16v5h-5M8 21H3v-5" />
-          </svg>
-        </button>
-      </footer>
-
-      {selected && (
+      {selected.length > 0 && (
         <aside className="inspector">
-          <label>
-            Color
-            <div className="swatches">
-              {COLORS.map((c) => (
-                <button
-                  key={c}
-                  type="button"
-                  className={c.toLowerCase() === selected.color.toLowerCase() ? "swatch on" : "swatch"}
-                  style={{ background: c }}
-                  onClick={() => setTree((prev) => recolorNode(prev, selected.id, c))}
-                  aria-label={c}
-                />
-              ))}
-            </div>
-          </label>
+          <span>Color</span>
+          <div className="swatches" role="group" aria-label="Color palette">
+            {COLOR_ROWS.flat().map((color) => (
+              <button
+                key={color}
+                type="button"
+                className="swatch"
+                style={{ background: color }}
+                onClick={() => setTree((prev) => recolorNodes(prev, selectedIds, color))}
+                title={color}
+                aria-label={color}
+                aria-pressed={selected.every((brick) => color.toLowerCase() === brick.color.toLowerCase())}
+              />
+            ))}
+          </div>
         </aside>
       )}
     </div>
@@ -342,9 +501,9 @@ function Brick({
   selected,
   editing,
   showPlus,
-  onSelect,
   onEdit,
   onRename,
+  onAddSibling,
   onPlusEnter,
   onPlusLeave,
   onAdd,
@@ -353,19 +512,21 @@ function Brick({
   selected: boolean;
   editing: boolean;
   showPlus: boolean;
-  onSelect: (toggle: boolean) => void;
   onEdit: () => void;
   onRename: (title: string) => void;
+  onAddSibling?: (title: string) => void;
   onPlusEnter: () => void;
   onPlusLeave: () => void;
   onAdd: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const addedSibling = useRef(false);
   const dark = isDark(brick.color);
 
   useEffect(() => {
     if (editing) {
-      inputRef.current?.focus();
+      addedSibling.current = false;
+      inputRef.current?.focus({ preventScroll: true });
       inputRef.current?.select();
     }
   }, [editing]);
@@ -380,10 +541,7 @@ function Brick({
         height: brick.height,
         background: brick.color,
       }}
-      onPointerDown={(e) => {
-        e.stopPropagation();
-        if (e.button === 0) onSelect(e.shiftKey);
-      }}
+      data-brick-id={brick.id}
       onDoubleClick={(e) => {
         e.stopPropagation();
         onEdit();
@@ -394,9 +552,18 @@ function Brick({
           ref={inputRef}
           className="brick-input"
           defaultValue={brick.title}
-          onPointerDown={(e) => e.stopPropagation()}
-          onBlur={(e) => onRename(e.currentTarget.value.trim() || "New")}
+          onBlur={(e) => {
+            if (!addedSibling.current) onRename(e.currentTarget.value.trim() || "New");
+          }}
           onKeyDown={(e) => {
+            if (e.key === "Tab" && onAddSibling && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              if (!e.repeat) {
+                addedSibling.current = true;
+                onAddSibling(e.currentTarget.value.trim() || "New");
+              }
+              return;
+            }
             if (e.key === "Enter") e.currentTarget.blur();
             if (e.key === "Escape") {
               e.currentTarget.value = brick.title;
@@ -412,17 +579,15 @@ function Brick({
         className="plus-zone"
         onPointerEnter={onPlusEnter}
         onPointerLeave={onPlusLeave}
-        onPointerDown={(e) => e.stopPropagation()}
       />
 
       {(showPlus || selected) && (
         <button
           type="button"
           className="plus"
-          title="Add brick underneath"
+          title="Add child block"
           onPointerEnter={onPlusEnter}
           onPointerLeave={onPlusLeave}
-          onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
             onAdd();
