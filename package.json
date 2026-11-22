@@ -1,6 +1,6 @@
 {
   "name": "bricks-map",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Vertical brick mind map whiteboard for Windows",
   "author": "Karen",
@@ -9,6 +9,7 @@
     "dev": "vite",
     "start": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "build": "vite build",
+    "dist:portable": "vite build && electron-builder --win portable --x64 --publish never",
     "dist": "vite build && electron-builder --win"
   },
   "build": {
@@ -21,6 +22,9 @@
       "dist/**/*",
       "electron/**/*"
     ],
+    "portable": {
+      "artifactName": "lk_BricksMap (${version}).${ext}"
+    },
     "win": {
       "target": "nsis"
     }

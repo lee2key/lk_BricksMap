@@ -1,6 +1,6 @@
 # lk Bricks
 
-Download **lk-Bricks-Setup-1.0.0-x64.exe** from [GitHub Releases](https://github.com/lee2key/lk_BricksMap/releases/latest), run the installer, then open **lk Bricks** from the Start menu. No separate Node.js installation or terminal is required.
+Download the portable **lk_BricksMap** executable for Windows x64 from [GitHub Releases](https://github.com/lee2key/lk_BricksMap/releases/latest) and double-click it. Keep the executable and the adjacent `lk Bricks Data` folder together to move your autosaved board.
 
 Windows whiteboard for a **top-down brick tree** — one root bar, children in a row underneath, and a **+** that appears when you hover the bottom of a brick.
 
@@ -13,13 +13,13 @@ npm start
 
 This opens the desktop window. For the browser only: `npm run dev`, then open http://127.0.0.1:5173
 
-## Installer
+## Windows builds
 
 ```bash
 npm run dist
 ```
 
-Creates a Windows installer in `release/`.
+Creates a Windows installer in `release/`. Run `npm run dist:portable` to build a standalone executable instead.
 
 ## Use
 

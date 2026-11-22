@@ -1,6 +1,11 @@
 const { app, BrowserWindow } = require("electron");
 const path = require("path");
 
+const portableDir = process.env.PORTABLE_EXECUTABLE_DIR;
+if (app.isPackaged && portableDir) {
+  app.setPath("userData", path.join(portableDir, "lk Bricks Data"));
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1440,
