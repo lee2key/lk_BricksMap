@@ -18,8 +18,9 @@ const DIRECTION_KEY = "bricks-map-direction";
 
 declare global {
   interface Window {
-    lkInitialBoard?: string | null;
-    chrome?: { webview?: { postMessage(message: string): void } };
+    lkDesktop?: boolean;
+    lkValidateBoard?: (encoded: string) => boolean;
+    chrome?: { webview?: EventTarget & { postMessage(message: string): void } };
   }
 }
 
@@ -40,17 +41,25 @@ function parseBoard(raw: string): BrickNode {
   return validate(data.tree);
 }
 
+function serializeBoard(tree: BrickNode) {
+  return JSON.stringify({ format: "bricks-map", version: 1, tree }, null, 2);
+}
+
+function decodeBoard(encoded: string) {
+  const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0));
+  return parseBoard(new TextDecoder().decode(bytes));
+}
+
+const desktop = window.lkDesktop ? window.chrome?.webview : undefined;
+if (desktop) {
+  window.lkValidateBoard = (encoded) => {
+    try { decodeBoard(encoded); return true; }
+    catch { return false; }
+  };
+}
+
 function loadTree(): BrickNode {
-  if (window.lkInitialBoard !== undefined) {
-    if (window.lkInitialBoard === null) return blankTree();
-    try {
-      const bytes = Uint8Array.from(atob(window.lkInitialBoard), char => char.charCodeAt(0));
-      return parseBoard(new TextDecoder().decode(bytes));
-    } catch (error) {
-      window.chrome?.webview?.postMessage("invalid");
-      throw error;
-    }
-  }
+  if (desktop) return blankTree();
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) return JSON.parse(raw) as BrickNode;
@@ -60,9 +69,10 @@ function loadTree(): BrickNode {
   return blankTree();
 }
 
-type BoardAction = { type: "change"; value: BrickNode | ((tree: BrickNode) => BrickNode) } | { type: "undo" };
+type BoardAction = { type: "change"; value: BrickNode | ((tree: BrickNode) => BrickNode) } | { type: "undo" } | { type: "load"; tree: BrickNode };
 
 function boardReducer(state: { tree: BrickNode; past: BrickNode[] }, action: BoardAction) {
+  if (action.type === "load") return { tree: action.tree, past: [] };
   if (action.type === "undo") {
     if (!state.past.length) return state;
     return { tree: state.past[state.past.length - 1], past: state.past.slice(0, -1) };
@@ -90,12 +100,14 @@ function selectionBounds(start: Point, end: Point): Marquee {
 export default function App() {
   const [{ tree }, dispatch] = useReducer(boardReducer, undefined, () => ({ tree: loadTree(), past: [] }));
   const setTree = (value: BrickNode | ((tree: BrickNode) => BrickNode)) => dispatch({ type: "change", value });
+  const [fileSession, setFileSession] = useState<number | null>(null);
+  const welcome = !!desktop && fileSession === null;
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [editingId, setEditingId] = useState<string | null>(null);
   const [hoverPlusId, setHoverPlusId] = useState<string | null>(null);
   const [direction, setDirection] = useState<TreeDirection>(() => {
-    try { return localStorage.getItem(DIRECTION_KEY) === "right" ? "right" : "down"; }
-    catch { return "down"; }
+    try { return localStorage.getItem(DIRECTION_KEY) === "down" ? "down" : "right"; }
+    catch { return "right"; }
   });
   const [camera, setCamera] = useState({ x: 80, y: 90, scale: 1 });
   const [panning, setPanning] = useState(false);
@@ -117,19 +129,19 @@ export default function App() {
     setMarquee(null);
   }, []);
 
-  const placed = useMemo(() => layoutTree(tree, direction), [tree, direction]);
+  const placed = useMemo(() => welcome ? [] : layoutTree(tree, direction), [tree, direction, welcome]);
 
   const previousTree = useRef(tree);
-  useEffect(() => {
-    if (window.lkInitialBoard !== undefined) {
-      if (previousTree.current !== tree) {
-        window.chrome?.webview?.postMessage(JSON.stringify({ format: "bricks-map", version: 1, tree }, null, 2));
+  useLayoutEffect(() => {
+    if (desktop) {
+      if (fileSession !== null && previousTree.current !== tree) {
+        desktop.postMessage("save:" + fileSession + ":" + serializeBoard(tree));
         previousTree.current = tree;
       }
       return;
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(tree));
-  }, [tree]);
+  }, [fileSession, tree]);
 
   const fitBoard = useCallback((bricks: PlacedBrick[]) => {
     const rect = boardRef.current?.getBoundingClientRect();
@@ -156,6 +168,7 @@ export default function App() {
   }, [direction]);
 
   useEffect(() => {
+    if (welcome) return;
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       const typing = target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
@@ -191,9 +204,10 @@ export default function App() {
     return () => {
       window.removeEventListener("keydown", onKey);
     };
-  }, [selectedIds, tree.id, fitAll]);
+  }, [selectedIds, tree.id, fitAll, welcome]);
 
   const onWheel = useCallback((e: React.WheelEvent) => {
+    if (welcome) return;
     e.preventDefault();
     const rect = boardRef.current?.getBoundingClientRect();
     if (!rect) return;
@@ -206,7 +220,7 @@ export default function App() {
       const wy = (my - cam.y) / cam.scale;
       return { scale: next, x: mx - wx * next, y: my - wy * next };
     });
-  }, []);
+  }, [welcome]);
 
   const pointerPosition = (e: React.PointerEvent<HTMLDivElement>): Point => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -214,7 +228,7 @@ export default function App() {
   };
 
   const onPointerDownBoard = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (gestureRef.current || (e.button !== 0 && e.button !== 1)) return;
+    if (welcome || gestureRef.current || (e.button !== 0 && e.button !== 1)) return;
     const target = e.target as Element;
     if (target.closest(".board-actions") || (e.button === 0 && target.closest("button, input"))) return;
 
@@ -322,32 +336,45 @@ export default function App() {
     });
   };
 
-  const exportBoard = () => {
-    const json = JSON.stringify({ format: "bricks-map", version: 1, tree }, null, 2);
-    const webview = window.chrome?.webview;
-    if (window.lkInitialBoard !== undefined && webview) {
-      webview.postMessage("export:" + json);
-      return;
-    }
-    const blob = new Blob([json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "bricks-map.json";
-    link.click();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  const loadBoard = useCallback((next: BrickNode) => {
+    previousTree.current = next;
+    dispatch({ type: "load", tree: next });
+    setSelectedIds(new Set());
+    setEditingId(null);
+    setHoverPlusId(null);
+    setFileError("");
+    fitBoard(layoutTree(next, direction));
+  }, [direction, fitBoard]);
+
+  useEffect(() => {
+    if (!desktop) return;
+    const onMessage = (event: Event) => {
+      const message: unknown = (event as MessageEvent).data;
+      if (typeof message !== "string") return;
+      const loaded = /^loaded:(\d+):(.+)$/.exec(message);
+      if (!loaded) return;
+      loadBoard(decodeBoard(loaded[2]));
+      setFileSession(Number(loaded[1]));
+    };
+    desktop.addEventListener("message", onMessage);
+    return () => desktop.removeEventListener("message", onMessage);
+  }, [loadBoard]);
+
+  const newMap = () => {
+    const next = blankTree();
+    if (desktop) desktop.postMessage("new:" + serializeBoard(next));
+    else loadBoard(next);
   };
 
-  const importBoard = async (file: File) => {
-    setFileError("");
+  const openMap = () => {
+    if (desktop) desktop.postMessage("open");
+    else importRef.current?.click();
+  };
+
+  const openBrowserFile = async (file: File) => {
     try {
       if (file.size > 5 * 1024 * 1024) throw new Error("File is too large (maximum 5 MB).");
-      const next = parseBoard(await file.text());
-      setTree(next);
-      setSelectedIds(new Set());
-      setEditingId(null);
-      setHoverPlusId(null);
-      fitBoard(layoutTree(next, direction));
+      loadBoard(parseBoard(await file.text()));
     } catch (error) {
       setFileError(error instanceof SyntaxError ? "Invalid JSON file." : error instanceof Error ? error.message : "Could not read the board file.");
     }
@@ -357,35 +384,21 @@ export default function App() {
 
   return (
     <div className="app">
-      <header className="toolbar">
-        <button
-          type="button"
-          onClick={() => {
-            setTree(blankTree());
-            setHoverPlusId(null);
-            setSelectedIds(new Set());
-            setEditingId(null);
-            setCamera({ x: 80, y: 90, scale: 1 });
-          }}
-        >
+      <header className={`toolbar${welcome ? " welcome-tools" : ""}`}>
+        {welcome && <p>Open a map or start a new one.</p>}
+        <button type="button" onClick={newMap}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-          Create New
+          New
         </button>
-        <div className="toolbar-actions">
-          <button type="button" onClick={() => importRef.current?.click()} title="Replace the current board from a file">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M4 16v4h16v-4" /></svg>
-            Import
-          </button>
-          <button type="button" onClick={exportBoard}>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3m-4 4 4-4 4 4M4 16v4h16v-4" /></svg>
-            Export
-          </button>
-          <input ref={importRef} type="file" accept=".json,application/json" hidden onChange={(e) => {
-            const file = e.currentTarget.files?.[0];
-            e.currentTarget.value = "";
-            if (file) void importBoard(file);
-          }} />
-        </div>
+        <button type="button" onClick={openMap}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
+          Open
+        </button>
+        {!desktop && <input ref={importRef} type="file" accept=".json,application/json" hidden onChange={(e) => {
+          const file = e.currentTarget.files?.[0];
+          e.currentTarget.value = "";
+          if (file) void openBrowserFile(file);
+        }} />}
       </header>
       {fileError && <div role="alert" className="file-error">{fileError}</div>}
 
@@ -442,6 +455,7 @@ export default function App() {
           }} />
         )}
 
+        {!welcome && <>
         <p className="hint">
           <span>+ · Add children to selected blocks</span>
           <span>Double-click · Rename</span>
@@ -471,6 +485,7 @@ export default function App() {
             Fit All
           </button>
         </div>
+        </>}
       </div>
 
       {selected.length > 0 && (

@@ -14,8 +14,7 @@ internal static class Program {
     [STAThread]
     static void Main() {
         Application.EnableVisualStyles();
-        string board = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "board.json");
-        string key = BitConverter.ToString(SHA256.Create().ComputeHash(Encoding.UTF8.GetBytes(board.ToUpperInvariant())));
+        string key = PathKey(AppDomain.CurrentDomain.BaseDirectory);
         bool first;
         using (var mutex = new Mutex(true, @"Local\lkBricks-" + key, out first)) {
             if (!first) { MessageBox.Show("This board is already open.", "lk Bricks Map"); return; }
@@ -33,24 +32,31 @@ internal static class Program {
                     var name = new AssemblyName(args.Name).Name;
                     return name.StartsWith("Microsoft.Web.WebView2.") ? Assembly.LoadFrom(Path.Combine(root, name + ".dll")) : null;
                 };
-                Run(root, Path.Combine(cache, "profiles", key.Replace("-", "")), board);
+                Run(root, Path.Combine(cache, "profiles", key));
             } catch (Exception ex) { MessageBox.Show(ex.Message, "lk Bricks Map"); }
         }
     }
 
+    internal static string PathKey(string path) {
+        using (var sha = SHA256.Create())
+            return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(path.ToUpperInvariant()))).Replace("-", "");
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
-    static void Run(string root, string profile, string board) { Application.Run(new BoardWindow(root, profile, board)); }
+    static void Run(string root, string profile) { Application.Run(new BoardWindow(root, profile)); }
 }
 
 internal sealed class BoardWindow : Form {
     const string Page = "https://lk-bricks.local/index.html";
     readonly WebView2 view = new WebView2();
     readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 60000 };
-    readonly string board;
+    string boardPath;
     string pending;
+    Mutex boardMutex;
+    int session;
+    bool choosingFile;
 
-    internal BoardWindow(string root, string profile, string file) {
-        board = file;
+    internal BoardWindow(string root, string profile) {
         Text = "lk Bricks Map";
         Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         Width = 1440; Height = 900;
@@ -65,51 +71,116 @@ internal sealed class BoardWindow : Form {
                 core.SetVirtualHostNameToFolderMapping("lk-bricks.local", Path.Combine(root, "site"), CoreWebView2HostResourceAccessKind.DenyCors);
                 core.NavigationStarting += (s,e) => { if (e.Uri != Page) e.Cancel = true; };
                 core.NewWindowRequested += (s,e) => e.Handled = true;
-                string initial = File.Exists(file) ? "'" + Convert.ToBase64String(File.ReadAllBytes(file)) + "'" : "null";
-                await core.AddScriptToExecuteOnDocumentCreatedAsync("if(location.href==='" + Page + "') window.lkInitialBoard=" + initial + ";");
-                core.WebMessageReceived += (s,e) => {
+                await core.AddScriptToExecuteOnDocumentCreatedAsync("if(location.href==='" + Page + "') window.lkDesktop=true;");
+                core.WebMessageReceived += async (s,e) => {
                     if (e.Source != Page) return;
                     string msg = e.TryGetWebMessageAsString();
-                    if (msg == "invalid") { MessageBox.Show("Cannot open board.json. Check the file and restart.", Text); Close(); }
-                    else if (msg.StartsWith("export:", StringComparison.Ordinal)) ExportBoard(msg.Substring("export:".Length));
-                    else pending = msg;
+                    string savePrefix = "save:" + session + ":";
+                    if (boardPath != null && msg.StartsWith(savePrefix, StringComparison.Ordinal)) {
+                        pending = msg.Substring(savePrefix.Length);
+                    } else if (msg == "open" || msg.StartsWith("new:", StringComparison.Ordinal)) {
+                        await ChooseBoardAsync(msg == "open" ? null : msg.Substring(4));
+                    }
                 };
                 core.Navigate(Page);
-                timer.Tick += (s,e) => Save();
+                timer.Tick += (s,e) => { if (!choosingFile) Save(); };
                 timer.Start();
             } catch (Exception ex) { MessageBox.Show(ex.Message, Text); Close(); }
         };
-        FormClosing += (s,e) => { if (!Save()) e.Cancel = true; };
-        FormClosed += (s,e) => timer.Dispose();
+        FormClosing += (s,e) => { if (choosingFile || !Save()) e.Cancel = true; };
+        FormClosed += (s,e) => {
+            timer.Dispose();
+            ReleaseBoardMutex();
+        };
     }
 
-    void ExportBoard(string json) {
+    async System.Threading.Tasks.Task ChooseBoardAsync(string initialJson) {
+        if (choosingFile) return;
+        choosingFile = true;
+        Mutex nextMutex = null;
         try {
-            using (var dialog = new SaveFileDialog {
-                Title = "Save board as",
-                Filter = "JSON board (*.json)|*.json",
-                DefaultExt = "json",
-                AddExtension = true,
-                FileName = "bricks-map.json",
-                OverwritePrompt = true
-            }) {
-                if (dialog.ShowDialog(this) == DialogResult.OK)
-                    File.WriteAllText(dialog.FileName, json, new UTF8Encoding(false));
+            await System.Threading.Tasks.Task.Yield();
+            string path;
+            using (FileDialog dialog = initialJson == null
+                ? (FileDialog)new OpenFileDialog { Title = "Open map", CheckFileExists = true }
+                : new SaveFileDialog { Title = "New map", DefaultExt = "json", AddExtension = true, OverwritePrompt = true, FileName = "bricks-map.json" }) {
+                dialog.Filter = "JSON board (*.json)|*.json|All files (*.*)|*.*";
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                path = Path.GetFullPath(dialog.FileName);
             }
+
+            if (!string.Equals(path, boardPath, StringComparison.OrdinalIgnoreCase)) {
+                var candidate = new Mutex(false, @"Local\lkBricks-file-" + Program.PathKey(path));
+                bool acquired;
+                try { acquired = candidate.WaitOne(0); }
+                catch (AbandonedMutexException) { acquired = true; }
+                if (!acquired) {
+                    candidate.Dispose();
+                    throw new IOException("This map is already open in another window.");
+                }
+                nextMutex = candidate;
+            }
+            if (!Save()) return;
+
+            byte[] bytes;
+            if (initialJson != null) {
+                bytes = Encoding.UTF8.GetBytes(initialJson);
+            } else {
+                bytes = File.ReadAllBytes(path);
+            }
+            string encoded = Convert.ToBase64String(bytes);
+            if (await view.CoreWebView2.ExecuteScriptAsync("window.lkValidateBoard('" + encoded + "')") != "true")
+                throw new IOException("The file is not a valid lk Bricks Map board.");
+
+            if (initialJson != null) WriteBoard(path, initialJson);
+            if (nextMutex != null) {
+                ReleaseBoardMutex();
+                boardMutex = nextMutex;
+                nextMutex = null;
+            }
+            boardPath = path;
+            pending = null;
+            session++;
+            Text = "lk Bricks Map - " + Path.GetFileName(path);
+            view.CoreWebView2.PostWebMessageAsString("loaded:" + session + ":" + encoded);
         } catch (Exception ex) {
-            MessageBox.Show(this, "Could not export the board. " + ex.Message, Text);
+            MessageBox.Show(this, "Could not " + (initialJson == null ? "open" : "create") + " the map. " + ex.Message, Text);
+        } finally {
+            if (nextMutex != null) {
+                nextMutex.ReleaseMutex();
+                nextMutex.Dispose();
+            }
+            choosingFile = false;
+        }
+    }
+
+    void ReleaseBoardMutex() {
+        if (boardMutex == null) return;
+        boardMutex.ReleaseMutex();
+        boardMutex.Dispose();
+        boardMutex = null;
+    }
+
+    static void WriteBoard(string path, string json) {
+        string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try {
+            File.WriteAllText(temp, json, new UTF8Encoding(false));
+            if (File.Exists(path)) File.Replace(temp, path, null);
+            else File.Move(temp, path);
+        } finally {
+            if (File.Exists(temp)) File.Delete(temp);
         }
     }
 
     bool Save() {
         if (pending == null) return true;
         try {
-            string temp = board + ".tmp";
-            File.WriteAllText(temp, pending, new UTF8Encoding(false));
-            if (File.Exists(board)) File.Replace(temp, board, null);
-            else File.Move(temp, board);
+            WriteBoard(boardPath, pending);
             pending = null;
             return true;
-        } catch (Exception ex) { MessageBox.Show("Could not save board.json. " + ex.Message, Text); return false; }
+        } catch (Exception ex) {
+            MessageBox.Show(this, "Could not save " + boardPath + ". " + ex.Message, Text);
+            return false;
+        }
     }
 }
