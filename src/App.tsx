@@ -9,7 +9,7 @@ import {
   recolorNodes,
   removeNode,
   renameAndAddSibling,
-  renameNode,
+  renameNodes,
   type TreeDirection,
 } from "./tree";
 
@@ -84,7 +84,17 @@ function boardReducer(state: { tree: BrickNode; past: BrickNode[] }, action: Boa
 
 type Point = { x: number; y: number };
 type Marquee = { left: number; top: number; right: number; bottom: number };
+type Camera = Point & { scale: number };
+
+function zoomAt(camera: Camera, anchor: Point, factor: number): Camera {
+  const minScale = Math.min(0.25, camera.scale);
+  const scale = Math.min(2.4, Math.max(minScale, camera.scale * factor));
+  const ratio = scale / camera.scale;
+  return { scale, x: anchor.x + (camera.x - anchor.x) * ratio, y: anchor.y + (camera.y - anchor.y) * ratio };
+}
+
 type Gesture =
+  | { kind: "zoom"; pointerId: number; start: Point; camera: Camera }
   | { kind: "pan"; pointerId: number; start: Point; camera: Point }
   | { kind: "select"; pointerId: number; start: Point; brickId?: string; extend: boolean; moved: boolean };
 
@@ -104,6 +114,7 @@ export default function App() {
   const welcome = !!desktop && fileSession === null;
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [editingId, setEditingId] = useState<string | null>(null);
+  const groupEdit = useRef<ReadonlySet<string> | null>(null);
   const [hoverPlusId, setHoverPlusId] = useState<string | null>(null);
   const [direction, setDirection] = useState<TreeDirection>(() => {
     try { return localStorage.getItem(DIRECTION_KEY) === "down" ? "down" : "right"; }
@@ -111,6 +122,7 @@ export default function App() {
   });
   const [camera, setCamera] = useState({ x: 80, y: 90, scale: 1 });
   const [panning, setPanning] = useState(false);
+  const [zooming, setZooming] = useState(false);
   const [marquee, setMarquee] = useState<Marquee | null>(null);
 
   const importRef = useRef<HTMLInputElement>(null);
@@ -126,6 +138,7 @@ export default function App() {
       board.releasePointerCapture(gesture.pointerId);
     }
     setPanning(false);
+    setZooming(false);
     setMarquee(null);
   }, []);
 
@@ -167,59 +180,13 @@ export default function App() {
     try { localStorage.setItem(DIRECTION_KEY, direction); } catch { /* Storage is optional for view preferences. */ }
   }, [direction]);
 
-  useEffect(() => {
-    if (welcome) return;
-    const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement;
-      const typing = target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
-      if (e.type === "keydown" && !typing) {
-        if (e.ctrlKey && !e.altKey && !e.shiftKey && e.code === "KeyZ") {
-          e.preventDefault();
-          dispatch({ type: "undo" });
-          setSelectedIds(new Set());
-          setEditingId(null);
-          setHoverPlusId(null);
-          return;
-        }
-        if (e.code === "KeyF" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-          e.preventDefault();
-          fitAll();
-          return;
-        }
-      }
-      if (e.type === "keydown" && (e.key === "Delete" || e.key === "Backspace" ||
-        (e.code === "KeyX" && !e.ctrlKey && !e.metaKey && !e.altKey))) {
-        const t = e.target as HTMLElement;
-        if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable) return;
-        if ([...selectedIds].some((id) => id !== tree.id)) {
-          e.preventDefault();
-          setTree((prev) => [...selectedIds].reduce((next, id) => removeNode(next, id), prev));
-          setEditingId(null);
-          setHoverPlusId(null);
-          setSelectedIds(new Set());
-        }
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [selectedIds, tree.id, fitAll, welcome]);
-
   const onWheel = useCallback((e: React.WheelEvent) => {
     if (welcome) return;
     e.preventDefault();
     const rect = boardRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    setCamera((cam) => {
-      const factor = e.deltaY > 0 ? 0.92 : 1.08;
-      const next = Math.min(2.4, Math.max(0.25, cam.scale * factor));
-      const wx = (mx - cam.x) / cam.scale;
-      const wy = (my - cam.y) / cam.scale;
-      return { scale: next, x: mx - wx * next, y: my - wy * next };
-    });
+    const anchor = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    setCamera((cam) => zoomAt(cam, anchor, e.deltaY > 0 ? 0.92 : 1.08));
   }, [welcome]);
 
   const pointerPosition = (e: React.PointerEvent<HTMLDivElement>): Point => {
@@ -228,12 +195,17 @@ export default function App() {
   };
 
   const onPointerDownBoard = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (welcome || gestureRef.current || (e.button !== 0 && e.button !== 1)) return;
+    if (welcome || gestureRef.current || ![0, 1, 2].includes(e.button)) return;
     const target = e.target as Element;
     if (target.closest(".board-actions") || (e.button === 0 && target.closest("button, input"))) return;
 
     const start = pointerPosition(e);
-    if (e.button === 1) {
+    if (e.button === 2) {
+      e.preventDefault();
+      gestureRef.current = { kind: "zoom", pointerId: e.pointerId, start, camera };
+      e.currentTarget.setPointerCapture(e.pointerId);
+      setZooming(true);
+    } else if (e.button === 1) {
       e.preventDefault();
       gestureRef.current = { kind: "pan", pointerId: e.pointerId, start, camera };
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -249,6 +221,10 @@ export default function App() {
     const gesture = gestureRef.current;
     if (!gesture || gesture.pointerId !== e.pointerId) return;
     const point = pointerPosition(e);
+    if (gesture.kind === "zoom") {
+      setCamera(zoomAt(gesture.camera, gesture.start, Math.exp((gesture.start.y - point.y) / 180)));
+      return;
+    }
     if (gesture.kind === "pan") {
       setCamera((cam) => ({
         ...cam,
@@ -298,21 +274,79 @@ export default function App() {
     if (gestureRef.current?.pointerId === e.pointerId) endGesture();
   };
 
-  const handleAdd = (id: string) => {
+  const handleAdd = useCallback((id: string) => {
     const parents = selectedIds.has(id) ? selectedIds : new Set([id]);
     const { tree: next, added } = addChildren(tree, parents);
     const editingChild = added.get(id);
     if (!editingChild) return;
-    setTree(next);
+    dispatch({ type: "change", value: next });
+    groupEdit.current = null;
     setSelectedIds(new Set(added.values()));
     setEditingId(editingChild);
     setHoverPlusId(null);
-  };
+  }, [tree, selectedIds]);
+
+  useEffect(() => {
+    if (welcome) return;
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      const typing = target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
+      if (!typing && !e.isComposing && selectedIds.size > 0 &&
+        (e.key === "Enter" || e.key === "Tab") && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
+        !target.closest?.("button, a, select")) {
+        e.preventDefault();
+        if (!e.repeat) {
+          const first = selectedIds.values().next().value;
+          if (first && e.key === "Tab") handleAdd(first);
+          else if (first) {
+            groupEdit.current = selectedIds.size > 1 ? selectedIds : null;
+            setEditingId(first);
+          }
+        }
+        return;
+      }
+      if (e.type === "keydown" && !typing) {
+        if (e.ctrlKey && !e.altKey && !e.shiftKey && e.code === "KeyZ") {
+          e.preventDefault();
+          dispatch({ type: "undo" });
+          setSelectedIds(new Set());
+          setEditingId(null);
+          setHoverPlusId(null);
+          return;
+        }
+        if (e.code === "KeyF" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          e.preventDefault();
+          fitAll();
+          return;
+        }
+      }
+      if (e.type === "keydown" && (e.key === "Delete" || e.key === "Backspace" ||
+        (e.code === "KeyX" && !e.ctrlKey && !e.metaKey && !e.altKey))) {
+        const t = e.target as HTMLElement;
+        if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable) return;
+        if ([...selectedIds].some((id) => id !== tree.id)) {
+          e.preventDefault();
+          setTree((prev) => [...selectedIds].reduce((next, id) => removeNode(next, id), prev));
+          setEditingId(null);
+          setHoverPlusId(null);
+          setSelectedIds(new Set());
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [selectedIds, tree.id, fitAll, welcome, handleAdd]);
 
   const handleAddSibling = (id: string, title: string) => {
-    const result = renameAndAddSibling(tree, id, title);
+    const ids = groupEdit.current;
+    const renamed = ids && title ? renameNodes(tree, ids, title) : tree;
+    const originalTitle = placed.find((brick) => brick.id === id)?.title ?? "New";
+    const result = renameAndAddSibling(renamed, id, title || (ids ? originalTitle : "New"));
     if (!result) return;
 
+    groupEdit.current = null;
     setTree(result.tree);
     setSelectedIds(new Set([result.newId]));
     setEditingId(result.newId);
@@ -405,8 +439,9 @@ export default function App() {
       <div
         ref={boardRef}
         data-direction={direction}
-        className={`board ${panning ? "panning" : marquee ? "selecting" : ""}`}
+        className={`board ${panning ? "panning" : zooming ? "zooming" : marquee ? "selecting" : ""}`}
         onWheel={onWheel}
+        onContextMenu={(e) => e.preventDefault()}
         onPointerDown={onPointerDownBoard}
         onPointerMove={onPointerMoveBoard}
         onPointerUp={onPointerUpBoard}
@@ -433,9 +468,17 @@ export default function App() {
               selected={selectedIds.has(brick.id)}
               editing={brick.id === editingId}
               showPlus={hoverPlusId === brick.id}
-              onEdit={() => setEditingId(brick.id)}
+              groupEditing={brick.id === editingId && groupEdit.current !== null}
+              onEdit={() => {
+                groupEdit.current = null;
+                setEditingId(brick.id);
+              }}
               onRename={(title) => {
-                setTree((prev) => renameNode(prev, brick.id, title));
+                const ids = groupEdit.current;
+                groupEdit.current = null;
+                if (title !== null && (title || !ids)) {
+                  setTree((prev) => renameNodes(prev, ids ?? new Set([brick.id]), title || "New"));
+                }
                 setEditingId(null);
               }}
               onAddSibling={brick.id === tree.id ? undefined : (title) => handleAddSibling(brick.id, title)}
@@ -457,16 +500,11 @@ export default function App() {
 
         {!welcome && <>
         <p className="hint">
-          <span>+ · Add children to selected blocks</span>
-          <span>Double-click · Rename</span>
-          <span>Tab while editing · Add {direction === "right" ? "below" : "to the right"}</span>
-          <span>Shift + click · Select multiple blocks</span>
-          <span>X / Delete · Remove selected blocks</span>
-          <span>Ctrl + Z · Undo</span>
-          <span>Left drag · Select blocks</span>
-          <span>Middle drag · Pan</span>
-          <span>Scroll · Zoom</span>
-          <span>F · Fit all</span>
+          <span>Double-click / Enter — Edit</span>
+          <span>Tab — Add Next Block</span>
+          <span>X / Delete — Remove Selected</span>
+          <span>F — Fit All</span>
+          <span>Ctrl Z — Undo</span>
         </p>
         <div className="board-actions">
           <button type="button" aria-pressed={direction === "right"}
@@ -515,6 +553,7 @@ function Brick({
   brick,
   selected,
   editing,
+  groupEditing,
   showPlus,
   onEdit,
   onRename,
@@ -526,9 +565,10 @@ function Brick({
   brick: PlacedBrick;
   selected: boolean;
   editing: boolean;
+  groupEditing: boolean;
   showPlus: boolean;
   onEdit: () => void;
-  onRename: (title: string) => void;
+  onRename: (title: string | null) => void;
   onAddSibling?: (title: string) => void;
   onPlusEnter: () => void;
   onPlusLeave: () => void;
@@ -536,11 +576,13 @@ function Brick({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const addedSibling = useRef(false);
+  const cancelled = useRef(false);
   const dark = isDark(brick.color);
 
   useEffect(() => {
     if (editing) {
       addedSibling.current = false;
+      cancelled.current = false;
       inputRef.current?.focus({ preventScroll: true });
       inputRef.current?.select();
     }
@@ -566,22 +608,24 @@ function Brick({
         <input
           ref={inputRef}
           className="brick-input"
-          defaultValue={brick.title}
+          defaultValue={groupEditing ? "" : brick.title}
+          placeholder={groupEditing ? "Rename selected blocks" : undefined}
           onBlur={(e) => {
-            if (!addedSibling.current) onRename(e.currentTarget.value.trim() || "New");
+            if (!addedSibling.current) onRename(cancelled.current ? null : e.currentTarget.value.trim());
           }}
           onKeyDown={(e) => {
             if (e.key === "Tab" && onAddSibling && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               if (!e.repeat) {
                 addedSibling.current = true;
-                onAddSibling(e.currentTarget.value.trim() || "New");
+                onAddSibling(e.currentTarget.value.trim());
               }
               return;
             }
+            if (e.nativeEvent.isComposing) return;
             if (e.key === "Enter") e.currentTarget.blur();
             if (e.key === "Escape") {
-              e.currentTarget.value = brick.title;
+              cancelled.current = true;
               e.currentTarget.blur();
             }
           }}

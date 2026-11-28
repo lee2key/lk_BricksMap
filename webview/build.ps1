@@ -43,8 +43,8 @@ try {
     $versionSource = Join-Path $stage 'Version.cs'
     @"
 using System.Reflection;
-[assembly: AssemblyTitle("lk Bricks Map")]
-[assembly: AssemblyProduct("lk Bricks Map")]
+[assembly: AssemblyTitle("lk_BricksMap")]
+[assembly: AssemblyProduct("lk_BricksMap")]
 [assembly: AssemblyVersion("$fileVersion")]
 [assembly: AssemblyFileVersion("$fileVersion")]
 "@ | Set-Content -LiteralPath $versionSource -Encoding UTF8
@@ -53,7 +53,7 @@ using System.Reflection;
     $options = @(
         '/nologo', '/target:winexe', '/platform:x64', '/optimize+'
         '/win32manifest:webview\app.manifest', '/win32icon:public\app-icon.ico'
-        "/out:$release/lk Bricks Map.exe", "/resource:$stage/payload.zip,payload"
+        "/out:$release/lk_BricksMap.exe", "/resource:$stage/payload.zip,payload"
         '/r:System.Windows.Forms.dll', '/r:System.Drawing.dll'
         '/r:System.IO.Compression.dll', '/r:System.IO.Compression.FileSystem.dll'
         "/r:$payload/Microsoft.Web.WebView2.Core.dll", "/r:$payload/Microsoft.Web.WebView2.WinForms.dll"

@@ -116,6 +116,11 @@ body,
   cursor: move;
 }
 
+.board.zooming,
+.board.zooming .world * {
+  cursor: ns-resize;
+}
+
 .board.selecting,
 .board.selecting .world * {
   cursor: crosshair;

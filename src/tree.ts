@@ -127,8 +127,8 @@ export function renameAndAddSibling(root: BrickNode, id: string, title: string) 
   return { tree, newId: sibling.id };
 }
 
-export function renameNode(root: BrickNode, id: string, title: string): BrickNode {
-  return mapTree(root, (n) => (n.id === id ? { ...n, title } : n));
+export function renameNodes(root: BrickNode, ids: ReadonlySet<string>, title: string): BrickNode {
+  return mapTree(root, (node) => (ids.has(node.id) ? { ...node, title } : node));
 }
 
 export function removeNode(root: BrickNode, id: string): BrickNode {

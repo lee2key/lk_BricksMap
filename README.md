@@ -1,4 +1,4 @@
-# lk Bricks Map
+# lk_BricksMap
 
 A whiteboard for building trees of colored blocks. Download the portable Windows x64 EXE from [GitHub Releases](https://github.com/lee2key/lk_BricksMap/releases/latest) and double-click it. The app uses the Microsoft WebView2 Runtime already present on Windows 11 and many Windows 10 systems.
 
@@ -7,9 +7,9 @@ At startup, choose **New** to create a JSON file in a location you choose, or **
 ## Controls
 
 - Hover the growing edge of a block and click **+** to add children. If the block is selected, **+** adds a child under every selected block.
-- Double-click to rename. While editing, press **Tab** to add and edit the next sibling.
+- Double-click or press **Enter** to rename. With multiple blocks selected, **Enter** renames them together. **Tab** adds children to selected blocks, or adds the next sibling while editing.
 - Click to select, **Shift + click** to toggle blocks, or drag with the left mouse button to select an area. The palette applies colors to the whole selection.
-- Drag with the middle mouse button to pan. Scroll to zoom.
+- Drag with the middle mouse button to pan. Scroll or hold the right mouse button and drag vertically to zoom.
 - **Layout** switches between left-to-right (the default) and top-to-bottom. **F** or **Fit All** frames the tree. The tree also fits when a file is opened.
 - **X**, **Delete**, or **Backspace** removes selected blocks and their descendants. **Ctrl+Z** undoes up to 30 board changes.
 
@@ -26,4 +26,4 @@ Open the URL printed by Vite to preview the interface in the browser. The previe
 npm run dist
 ```
 
-The build downloads a pinned Microsoft WebView2 SDK and produces `release/lk Bricks Map.exe`.
+The build downloads a pinned Microsoft WebView2 SDK and produces `release/lk_BricksMap.exe`.

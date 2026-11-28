@@ -17,7 +17,7 @@ internal static class Program {
         string key = PathKey(AppDomain.CurrentDomain.BaseDirectory);
         bool first;
         using (var mutex = new Mutex(true, @"Local\lkBricks-" + key, out first)) {
-            if (!first) { MessageBox.Show("This board is already open.", "lk Bricks Map"); return; }
+            if (!first) { MessageBox.Show("This board is already open.", "lk_BricksMap"); return; }
             try {
                 var asm = Assembly.GetExecutingAssembly();
                 string cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "lk Bricks WebView2");
@@ -33,7 +33,7 @@ internal static class Program {
                     return name.StartsWith("Microsoft.Web.WebView2.") ? Assembly.LoadFrom(Path.Combine(root, name + ".dll")) : null;
                 };
                 Run(root, Path.Combine(cache, "profiles", key));
-            } catch (Exception ex) { MessageBox.Show(ex.Message, "lk Bricks Map"); }
+            } catch (Exception ex) { MessageBox.Show(ex.Message, "lk_BricksMap"); }
         }
     }
 
@@ -57,7 +57,7 @@ internal sealed class BoardWindow : Form {
     bool choosingFile;
 
     internal BoardWindow(string root, string profile) {
-        Text = "lk Bricks Map";
+        Text = "lk_BricksMap";
         Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         Width = 1440; Height = 900;
         view.Dock = DockStyle.Fill;
@@ -130,7 +130,7 @@ internal sealed class BoardWindow : Form {
             }
             string encoded = Convert.ToBase64String(bytes);
             if (await view.CoreWebView2.ExecuteScriptAsync("window.lkValidateBoard('" + encoded + "')") != "true")
-                throw new IOException("The file is not a valid lk Bricks Map board.");
+                throw new IOException("The file is not a valid lk_BricksMap board.");
 
             if (initialJson != null) WriteBoard(path, initialJson);
             if (nextMutex != null) {
@@ -141,7 +141,7 @@ internal sealed class BoardWindow : Form {
             boardPath = path;
             pending = null;
             session++;
-            Text = "lk Bricks Map - " + Path.GetFileName(path);
+            Text = "lk_BricksMap - " + Path.GetFileName(path);
             view.CoreWebView2.PostWebMessageAsString("loaded:" + session + ":" + encoded);
         } catch (Exception ex) {
             MessageBox.Show(this, "Could not " + (initialJson == null ? "open" : "create") + " the map. " + ex.Message, Text);
